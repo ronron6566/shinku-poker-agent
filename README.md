@@ -7,7 +7,7 @@ This API enables researchers to test their agents against [GTO Wizard AI](https:
 To dive deeper on how to benchmark your agent against GTO Wizard AI, check out the [API documentation](https://researcher.gtowizard.com/docs).
 
 ## Obtaining an API key
-Access to the Research API is currently gated. To obtain an API Key, please email **marco [at] gtowizard [dot] com** with the following information:
+Access to the Research API is currently gated. To obtain an API Key, please email **benchmark [at] gtowizard [dot] com** with the following information:
 
 1.  Your Name / Organization
 2.  A brief description of your research and the intended use case for the benchmark.
