@@ -6,11 +6,14 @@ This API enables researchers to test their agents against [GTO Wizard AI](https:
 ## Documentation
 To dive deeper on how to benchmark your agent against GTO Wizard AI, check out the [API documentation](https://researcher.gtowizard.com/docs).
 
-## Obtaining an API key
-Access to the Research API is currently gated. To obtain an API Key, please email **benchmark [at] gtowizard [dot] com** with the following information:
+## Technical Paper
+Learn more about the benchmark and the methodology by checking out our technical paper:
+[GTO Wizard Benchmark](https://arxiv.org/abs/2603.23660)
 
-1.  Your Name / Organization
-2.  A brief description of your research and the intended use case for the benchmark.
+## Obtaining an API key
+Visit https://benchmark.gtowizard.com/ and fill the form to request an API key. 
+
+We will review your request, and if approved, you will receive your key via email. **Note that the API only gives access to playing hands and observing the result of the hand (chips won/lost)**. It doesn't give access to any of our solver capabilities and any requests for such features will be automatically refused. We also reserve the right to revoke your access at any time if we suspect that the API is being misused.
 
 ## Installation
 **Prerequisites:**
@@ -27,11 +30,13 @@ uv sync
 
 This repository provides skeleton agents to benchmark against GTO Wizard AI:
 - **allin**: Always goes all-in when possible, otherwise calls
-- **checkcall**: Always checks when possible, otherwise calls
+- **check_call** / **checkcall**: Always checks when possible, otherwise calls
+- **random**: Samples uniformly from legal actions
+- **fold**: Folds when possible, otherwise checks
 
 **Run an agent:**
 ```bash
-cd src && uv run python -m main --api-key YOUR_API_KEY --agent allin --num-hands 10
+cd src && uv run python -m main --key YOUR_API_KEY --agent-type allin --num-hands 10
 ```
 ### Developing your own agent
-To create a custom agent, simply add a new class in `src/poker_agent.py` that implements the `PokerAgent` protocol.
+To create a custom agent, add a new class in `src/poker_agent.py` that implements the `PokerAgent` protocol.

@@ -1,6 +1,6 @@
 import asyncio
+import logging
 import time
-from http import HTTPStatus
 
 import httpx
 import structlog
@@ -8,63 +8,75 @@ from fire import Fire
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 from tqdm.asyncio import tqdm
 
-from poker_agent import AllinAgent, CheckCallAgent, PokerAgent
+from models import GameServiceResponse, NewHandRequest
+from poker_agent import AllinAgent, AlwaysFoldAgent, CheckCallAgent, PokerAgent, RandomUniformAgent
+from utils import is_engine_busy_exception
 
 _DEFAULT_GAME_NAME = "HUNL 200BB"
-_API_URL = "https://researcher.gtowizard.com"
-# We limit the number of concurrent hands to 5
-_MAX_CONCURRENT_HANDS = 5
-_AGENTS = {
+_DEFAULT_API_URL = "https://researcher.gtowizard.com"
+_DEFAULT_NUM_CONCURRENT_HANDS = 15
+_NUM_HANDS = 1000
+_SUPPORTED_AGENTS = {
     "allin": AllinAgent,
+    "check_call": CheckCallAgent,
     "checkcall": CheckCallAgent,
+    "random": RandomUniformAgent,
+    "fold": AlwaysFoldAgent,
 }
 logger = structlog.get_logger(__name__)
+logging.getLogger("httpx").disabled = True
 
 
-def _is_engine_busy_exception(exception: Exception) -> bool:
-    """
-    502, 503, and 504 errors can happen under high concurrency
-    """
-    return isinstance(exception, httpx.HTTPStatusError) and exception.response.status_code in (
-        HTTPStatus.BAD_GATEWAY,
-        HTTPStatus.SERVICE_UNAVAILABLE,
-        HTTPStatus.GATEWAY_TIMEOUT,
-    )
+def _format_http_error(exception: httpx.HTTPStatusError) -> str:
+    status_code = exception.response.status_code
+    error_message = exception.response.text.strip() or exception.response.reason_phrase
+    return f"{status_code} {error_message}" if error_message else str(status_code)
 
 
-def _log_retry_attempt(retry_state: RetryCallState) -> None:
+def log_retry_attempt(retry_state: RetryCallState) -> None:
     exception = retry_state.outcome.exception()
     wait_time = retry_state.next_action.sleep
     hand_id = retry_state.kwargs.get("hand_id")
     if isinstance(exception, httpx.HTTPStatusError):
-        error_msg = f"{exception.response.status_code} {exception.response.reason_phrase}"
+        error_msg = _format_http_error(exception)
     else:
         error_msg = str(exception)
-    logger.debug(
-        f"Engine busy. Waiting {wait_time:.2f}s",
+    logger.info(
+        f"{error_msg}. Retrying in {wait_time:.2f}s",
         extra={"hand_id": hand_id, "attempt": retry_state.attempt_number, "error": error_msg},
     )
 
 
-class AgentRunner:
-    def __init__(self, client: httpx.AsyncClient, agent: PokerAgent):
+class BenchmarkRunner:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        agent: PokerAgent,
+        num_concurrent_hands: int,
+        game_name: str,
+    ):
         self._client = client
         self._agent = agent
-        self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_HANDS)
+        self._game_name = game_name
+        self._semaphore = asyncio.Semaphore(num_concurrent_hands)
 
     @classmethod
-    def from_config(cls, agent: PokerAgent, api_key: str) -> "AgentRunner":
-        limits = httpx.Limits(
-            max_keepalive_connections=_MAX_CONCURRENT_HANDS,
-            max_connections=_MAX_CONCURRENT_HANDS * 2,
-        )
+    def from_config(
+        cls,
+        agent: PokerAgent,
+        api_url: str,
+        key: str,
+        num_concurrent_hands: int,
+        game_name: str,
+    ) -> "BenchmarkRunner":
+        limits = httpx.Limits(max_keepalive_connections=num_concurrent_hands, max_connections=num_concurrent_hands * 2)
         client = httpx.AsyncClient(
-            base_url=_API_URL,
-            headers={"X-API-KEY": api_key},
+            base_url=api_url,
+            headers={"X-API-Key": key},
             timeout=180,
             limits=limits,
         )
-        return cls(client, agent)
+        return cls(client, agent, num_concurrent_hands, game_name)
 
     async def __aenter__(self):
         return self
@@ -73,52 +85,96 @@ class AgentRunner:
         await self._client.aclose()
 
     @retry(
-        retry=retry_if_exception(_is_engine_busy_exception),
-        stop=stop_after_attempt(20),
-        wait=wait_exponential(multiplier=2, min=2, max=15),
-        before_sleep=_log_retry_attempt,
+        retry=retry_if_exception(is_engine_busy_exception),
+        stop=stop_after_attempt(32),
+        wait=wait_exponential(multiplier=2, min=2, max=32),
+        before_sleep=log_retry_attempt,
         reraise=True,
     )
-    async def _post_with_retry(self, url: str, json_data: dict, hand_id: int | None = None) -> httpx.Response:
+    async def _post(
+        self,
+        url: str,
+        json_data: dict[str, object],
+        hand_id: int | None = None,
+        game_state: GameServiceResponse | None = None,
+    ) -> httpx.Response:
         response = await self._client.post(url, json=json_data)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exception:
+            if not is_engine_busy_exception(exception):
+                logger.error(
+                    "Non-retryable API request failed",
+                    extra={
+                        "hand_id": hand_id,
+                        "url": url,
+                        "status_code": exception.response.status_code,
+                        "reason_phrase": exception.response.reason_phrase,
+                        "response_text": exception.response.text,
+                        "request_payload": json_data,
+                        "hand_state": game_state.model_dump(mode="json") if game_state is not None else None,
+                    },
+                )
+            raise
         return response
 
-    async def _create_new_hand(self) -> dict:
-        request = {"game_name": _DEFAULT_GAME_NAME}
-        response = await self._post_with_retry("/hands", json_data=request)
-        return response.json()
+    async def _create_new_hand(self) -> GameServiceResponse:
+        request = NewHandRequest(game_name=self._game_name).model_dump()
+        response = await self._post("/hands", json_data=request)
+        return GameServiceResponse(**response.json())
 
-    async def _act(self, hand_id: int, game_state: dict) -> dict:
+    async def _act(self, hand_id: int, game_state: GameServiceResponse) -> GameServiceResponse:
         action_request = await self._agent.act(game_state)
-        response = await self._post_with_retry(f"/hands/{hand_id}/act", json_data=action_request, hand_id=hand_id)
-        return response.json()
+        response = await self._post(
+            f"/hands/{hand_id}/act",
+            json_data=action_request.model_dump(),
+            hand_id=hand_id,
+            game_state=game_state,
+        )
+        return GameServiceResponse(**response.json())
 
     async def _play_hand(self) -> bool:
         hand_id = None
         async with self._semaphore:
             try:
-                response = await self._create_new_hand()
-                hand_id = response["hand_id"]
+                game_service_response = await self._create_new_hand()
+                hand_id = game_service_response.hand_id
 
-                while not response["game_state"]["is_hand_over"]:
-                    response = await self._act(hand_id, response)
+                while not game_service_response.game_state.is_hand_over:
+                    game_service_response = await self._act(hand_id, game_service_response)
                 return True
             except httpx.HTTPStatusError as e:
-                logger.error(f"API Error: {e.response.text}", extra={"hand_id": hand_id})
+                logger.error(
+                    f"{_format_http_error(e)} after exhausting retries",
+                    extra={"hand_id": hand_id, "response_text": e.response.text},
+                )
+                if not is_engine_busy_exception(e):
+                    raise
                 return False
             except Exception as e:
                 logger.error(f"Unexpected error: {e}", extra={"hand_id": hand_id})
                 return False
 
+    async def _cancel_pending_hands(self, hands: list[asyncio.Task[bool]]) -> None:
+        for hand in hands:
+            if not hand.done():
+                hand.cancel()
+        await asyncio.gather(*hands, return_exceptions=True)
+
     async def run(self, num_hands: int) -> None:
-        logger.info(f"Starting {num_hands} hands on game {_DEFAULT_GAME_NAME}")
+        logger.info(f"Starting benchmark for {num_hands} hands on game '{self._game_name}'")
         start_time = time.time()
-        hands = [self._play_hand() for _ in range(num_hands)]
+        hands = [asyncio.create_task(self._play_hand()) for _ in range(num_hands)]
         results = []
-        for hand in tqdm.as_completed(hands, total=num_hands, desc="Playing hands"):
-            result = await hand
-            results.append(result)
+        try:
+            for hand in tqdm.as_completed(hands, total=num_hands, desc="Playing hands"):
+                result = await hand
+                results.append(result)
+        except Exception as e:
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(f"Aborting benchmark: {_format_http_error(e)}")
+            await self._cancel_pending_hands(hands)
+            raise
 
         end_time = time.time()
         duration = end_time - start_time
@@ -131,19 +187,32 @@ class AgentRunner:
         )
 
 
-async def main(api_key: str, agent: str = "allin", num_hands: int = 1000):
+async def main(
+    key: str,
+    num_concurrent_hands: int = _DEFAULT_NUM_CONCURRENT_HANDS,
+    agent_type: str = "allin",
+    num_hands: int = _NUM_HANDS,
+    url: str = _DEFAULT_API_URL,
+    game: str = _DEFAULT_GAME_NAME,
+):
     """
-    Play `num_hands` hands against GTO Wizard AI.
+    Runs poker agent benchmark.
     Args:
-         api_key: User API Key to the Researcher API
-         agent: The poker agent to use
-         num_hands: Total hands to be played
+        key: User API Key to the Researcher API
+        num_concurrent_hands: Number of hands to run concurrently
+        agent_type: Type of agent to run
+        num_hands: Total hands
+        url: Researcher API URL
+        game: Game name
     """
-    agent_class = _AGENTS.get(agent.lower())
+    resolved_agent_type = agent_type.lower()
+    agent_class = _SUPPORTED_AGENTS.get(resolved_agent_type)
     if agent_class is None:
-        raise ValueError(f"Unknown agent: {agent}. Available: {', '.join(_AGENTS.keys())}")
-    agent = agent_class()
-    async with AgentRunner.from_config(agent, api_key) as runner:
+        supported = ", ".join(_SUPPORTED_AGENTS.keys())
+        raise ValueError(f"agent_type must be one of [{supported}], got: {resolved_agent_type}")
+
+    benchmark_agent = agent_class()
+    async with BenchmarkRunner.from_config(benchmark_agent, url, key, num_concurrent_hands, game) as runner:
         await runner.run(num_hands)
 
 
