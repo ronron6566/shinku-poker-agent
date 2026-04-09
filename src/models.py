@@ -91,12 +91,6 @@ class ActRequest(BaseModel):
             raise ValueError(f"Amount is required for action '{self.action}'")
         return self
 
-    @property
-    def engine_action(self) -> str:
-        if self.action == "b":
-            return f"b{self.amount}"
-        return self.action
-
 
 class NewHandRequest(BaseModel):
     game_name: Literal["HUNL 200BB"]
