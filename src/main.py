@@ -14,8 +14,11 @@ from utils import is_engine_busy_exception
 
 _DEFAULT_GAME_NAME = "HUNL 200BB"
 _DEFAULT_API_URL = "https://researcher.gtowizard.com"
-_DEFAULT_NUM_CONCURRENT_HANDS = 15
-_NUM_HANDS = 1000
+# Number of hands to play concurrently. Max number of allowed concurrent hands as of 2026-04-09 is 20
+# but it's recommended to set a smaller number so the script continues even if some hands fail.
+# It's possible to retrieve active hands to continue a hand that failed using one of the API endpoint (see documentation).
+_DEFAULT_NUM_CONCURRENT_HANDS = 5
+_NUM_HANDS = 100
 _SUPPORTED_AGENTS = {
     "allin": AllinAgent,
     "check_call": CheckCallAgent,
