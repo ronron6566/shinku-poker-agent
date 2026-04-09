@@ -30,7 +30,7 @@ uv sync
 
 This repository provides skeleton agents to benchmark against GTO Wizard AI:
 - **allin**: Always goes all-in when possible, otherwise calls
-- **check_call** / **checkcall**: Always checks when possible, otherwise calls
+- **check_call**: Always checks when possible, otherwise calls
 - **random**: Samples uniformly from legal actions
 - **fold**: Folds when possible, otherwise checks
 
