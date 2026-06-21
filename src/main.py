@@ -1,9 +1,11 @@
 import asyncio
 import logging
+import os
 import time
 
 import httpx
 import structlog
+from dotenv import load_dotenv
 from fire import Fire
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 from tqdm.asyncio import tqdm
@@ -11,6 +13,8 @@ from tqdm.asyncio import tqdm
 from models import GameServiceResponse, NewHandRequest
 from poker_agent import AllinAgent, AlwaysFoldAgent, CheckCallAgent, PokerAgent, RandomUniformAgent
 from utils import is_engine_busy_exception
+
+load_dotenv()
 
 _DEFAULT_GAME_NAME = "HUNL 200BB"
 _DEFAULT_API_URL = "https://researcher.gtowizard.com"
@@ -191,7 +195,7 @@ class BenchmarkRunner:
 
 
 async def main(
-    key: str,
+    key: str | None = None,
     num_concurrent_hands: int = _DEFAULT_NUM_CONCURRENT_HANDS,
     agent_type: str = "allin",
     num_hands: int = _NUM_HANDS,
@@ -208,6 +212,10 @@ async def main(
         url: Researcher API URL
         game: Game name
     """
+    key = key or os.getenv("GTOW_API_KEY")
+    if not key:
+        raise ValueError("API key not provided. Set GTOW_API_KEY in .env or pass --key.")
+
     resolved_agent_type = agent_type.lower()
     agent_class = _SUPPORTED_AGENTS.get(resolved_agent_type)
     if agent_class is None:

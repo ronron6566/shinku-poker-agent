@@ -38,5 +38,17 @@ This repository provides skeleton agents to benchmark against GTO Wizard AI:
 ```bash
 cd src && uv run python -m main --key YOUR_API_KEY --agent-type allin --num-hands 10
 ```
+
+The API key can also be provided via a `.env` file in the project root instead of `--key`:
+```
+GTOW_API_KEY=your_api_key_here
+```
+When `--key` is omitted, the value of `GTOW_API_KEY` is used.
+
 ### Developing your own agent
 To create a custom agent, add a new class in `src/poker_agent.py` that implements the `PokerAgent` protocol.
+
+## TODO
+- [ ] Hand history logging: each hand's `action_history`, `winnings`, and `aivat_score` are currently
+  discarded after a hand finishes. Add an option to persist them (e.g. one JSON object per hand to a
+  `.jsonl` file) so hands can be reviewed and analyzed afterwards.
