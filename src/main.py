@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import time
@@ -61,11 +62,15 @@ class BenchmarkRunner:
         agent: PokerAgent,
         num_concurrent_hands: int,
         game_name: str,
+        hand_log_path: str | None = None,
     ):
         self._client = client
         self._agent = agent
         self._game_name = game_name
         self._semaphore = asyncio.Semaphore(num_concurrent_hands)
+        self._hand_log_path = hand_log_path
+        self._hand_log_file = open(hand_log_path, "a") if hand_log_path else None
+        self._hand_log_lock = asyncio.Lock()
 
     @classmethod
     def from_config(
@@ -75,6 +80,7 @@ class BenchmarkRunner:
         key: str,
         num_concurrent_hands: int,
         game_name: str,
+        hand_log_path: str | None = None,
     ) -> "BenchmarkRunner":
         limits = httpx.Limits(max_keepalive_connections=num_concurrent_hands, max_connections=num_concurrent_hands * 2)
         client = httpx.AsyncClient(
@@ -83,13 +89,35 @@ class BenchmarkRunner:
             timeout=180,
             limits=limits,
         )
-        return cls(client, agent, num_concurrent_hands, game_name)
+        return cls(client, agent, num_concurrent_hands, game_name, hand_log_path)
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._client.aclose()
+        if self._hand_log_file is not None:
+            self._hand_log_file.close()
+
+    async def _log_hand(self, response: GameServiceResponse) -> None:
+        if self._hand_log_file is None:
+            return
+        game_state = response.game_state
+        record = {
+            "hand_id": response.hand_id,
+            "board_cards": game_state.board_cards,
+            "action_history": game_state.action_history,
+            "winnings": game_state.winnings,
+            "aivat_score": game_state.aivat_score,
+            "players": [
+                {"name": player.name, "position": player.position, "hole_cards": player.hole_cards}
+                for player in game_state.players
+            ],
+        }
+        line = json.dumps(record) + "\n"
+        async with self._hand_log_lock:
+            self._hand_log_file.write(line)
+            self._hand_log_file.flush()
 
     @retry(
         retry=retry_if_exception(is_engine_busy_exception),
@@ -140,7 +168,7 @@ class BenchmarkRunner:
         )
         return GameServiceResponse(**response.json())
 
-    async def _play_hand(self) -> bool:
+    async def _play_hand(self) -> GameServiceResponse | None:
         hand_id = None
         async with self._semaphore:
             try:
@@ -149,7 +177,8 @@ class BenchmarkRunner:
 
                 while not game_service_response.game_state.is_hand_over:
                     game_service_response = await self._act(hand_id, game_service_response)
-                return True
+                await self._log_hand(game_service_response)
+                return game_service_response
             except httpx.HTTPStatusError as e:
                 logger.error(
                     f"{_format_http_error(e)} after exhausting retries",
@@ -157,12 +186,12 @@ class BenchmarkRunner:
                 )
                 if not is_engine_busy_exception(e):
                     raise
-                return False
+                return None
             except Exception as e:
                 logger.error(f"Unexpected error: {e}", extra={"hand_id": hand_id})
-                return False
+                return None
 
-    async def _cancel_pending_hands(self, hands: list[asyncio.Task[bool]]) -> None:
+    async def _cancel_pending_hands(self, hands: list[asyncio.Task[GameServiceResponse | None]]) -> None:
         for hand in hands:
             if not hand.done():
                 hand.cancel()
@@ -185,13 +214,27 @@ class BenchmarkRunner:
 
         end_time = time.time()
         duration = end_time - start_time
-        successful_hands = sum(results)
+        successful = [r for r in results if r is not None]
+        successful_hands = len(successful)
         failed_hands = len(results) - successful_hands
         seconds_per_hand = duration / num_hands if num_hands > 0 else 0
         logger.info("Benchmark finished")
         logger.info(
             f"Successful hands: {successful_hands}. Failed hands: {failed_hands}. Average seconds/hand: {seconds_per_hand:.3f}"
         )
+
+        winnings = [r.game_state.winnings for r in successful if r.game_state.winnings is not None]
+        if winnings:
+            total_winnings = sum(winnings)
+            aivat_scores = [r.game_state.aivat_score for r in successful if r.game_state.aivat_score is not None]
+            avg_aivat = sum(aivat_scores) / len(aivat_scores) if aivat_scores else float("nan")
+            logger.info(
+                f"Total winnings: {total_winnings:.1f} chips. "
+                f"Avg winnings/hand: {total_winnings / len(winnings):.2f}. "
+                f"Avg AIVAT: {avg_aivat:.2f}"
+            )
+        if self._hand_log_path is not None:
+            logger.info(f"Hand history written to {self._hand_log_path}")
 
 
 async def main(
@@ -201,6 +244,7 @@ async def main(
     num_hands: int = _NUM_HANDS,
     url: str = _DEFAULT_API_URL,
     game: str = _DEFAULT_GAME_NAME,
+    log_file: str | None = None,
 ):
     """
     Runs poker agent benchmark.
@@ -211,6 +255,7 @@ async def main(
         num_hands: Total hands
         url: Researcher API URL
         game: Game name
+        log_file: Optional path to write per-hand history as JSONL (one finished hand per line)
     """
     key = key or os.getenv("GTOW_API_KEY")
     if not key:
@@ -223,7 +268,9 @@ async def main(
         raise ValueError(f"agent_type must be one of [{supported}], got: {resolved_agent_type}")
 
     benchmark_agent = agent_class()
-    async with BenchmarkRunner.from_config(benchmark_agent, url, key, num_concurrent_hands, game) as runner:
+    async with BenchmarkRunner.from_config(
+        benchmark_agent, url, key, num_concurrent_hands, game, log_file
+    ) as runner:
         await runner.run(num_hands)
 
 
