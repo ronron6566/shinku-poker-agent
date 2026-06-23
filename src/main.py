@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import math
 import os
+import statistics
 import time
 
 import httpx
@@ -24,6 +26,8 @@ _DEFAULT_API_URL = "https://researcher.gtowizard.com"
 # It's also possible to retrieve active hands, in order to continue a hand that failed, using one of the API endpoint (see API documentation).
 _DEFAULT_NUM_CONCURRENT_HANDS = 5
 _NUM_HANDS = 100
+# Name of the opponent agent on the server side; every other player is the hero (our agent).
+_OPPONENT_NAME = "GTO Wizard"
 _SUPPORTED_AGENTS = {
     "allin": AllinAgent,
     "check_call": CheckCallAgent,
@@ -39,6 +43,25 @@ def _format_http_error(exception: httpx.HTTPStatusError) -> str:
     status_code = exception.response.status_code
     error_message = exception.response.text.strip() or exception.response.reason_phrase
     return f"{status_code} {error_message}" if error_message else str(status_code)
+
+
+def _hero_player(players: list) -> object | None:
+    """Return the hero (our agent): the first player that is not the known opponent."""
+    for player in players:
+        if player.name != _OPPONENT_NAME:
+            return player
+    return None
+
+
+def _format_winrate(label: str, values: list[float], big_blind: float) -> str:
+    """Format a list of per-hand chip results as a bb/100 winrate with a 95% confidence interval."""
+    n = len(values)
+    bb_values = [v / big_blind for v in values]
+    bb_per_100 = (sum(bb_values) / n) * 100
+    if n > 1:
+        sem = statistics.stdev(bb_values) / math.sqrt(n)
+        return f"{label}: {bb_per_100:+.1f} bb/100 (95% CI ±{1.96 * sem * 100:.1f})"
+    return f"{label}: {bb_per_100:+.1f} bb/100"
 
 
 def log_retry_attempt(retry_state: RetryCallState) -> None:
@@ -105,12 +128,20 @@ class BenchmarkRunner:
         game_state = response.game_state
         record = {
             "hand_id": response.hand_id,
+            "street": game_state.street,
             "board_cards": game_state.board_cards,
             "action_history": game_state.action_history,
+            "total_pot": game_state.total_pot,
             "winnings": game_state.winnings,
             "aivat_score": game_state.aivat_score,
+            "has_gto_wizard_folded": game_state.has_gto_wizard_folded,
             "players": [
-                {"name": player.name, "position": player.position, "hole_cards": player.hole_cards}
+                {
+                    "name": player.name,
+                    "position": player.position,
+                    "hole_cards": player.hole_cards,
+                    "stack": player.stack,
+                }
                 for player in game_state.players
             ],
         }
@@ -223,18 +254,43 @@ class BenchmarkRunner:
             f"Successful hands: {successful_hands}. Failed hands: {failed_hands}. Average seconds/hand: {seconds_per_hand:.3f}"
         )
 
-        winnings = [r.game_state.winnings for r in successful if r.game_state.winnings is not None]
+        self._log_summary(successful)
+        if self._hand_log_path is not None:
+            logger.info(f"Hand history written to {self._hand_log_path}")
+
+    def _log_summary(self, hands: list[GameServiceResponse]) -> None:
+        if not hands:
+            return
+        blinds = hands[0].game.blinds
+        big_blind = max(blinds) if blinds else 1.0
+
+        winnings = [h.game_state.winnings for h in hands if h.game_state.winnings is not None]
+        aivat_scores = [h.game_state.aivat_score for h in hands if h.game_state.aivat_score is not None]
+
         if winnings:
             total_winnings = sum(winnings)
-            aivat_scores = [r.game_state.aivat_score for r in successful if r.game_state.aivat_score is not None]
-            avg_aivat = sum(aivat_scores) / len(aivat_scores) if aivat_scores else float("nan")
+            wins = sum(1 for w in winnings if w > 0)
             logger.info(
                 f"Total winnings: {total_winnings:.1f} chips. "
                 f"Avg winnings/hand: {total_winnings / len(winnings):.2f}. "
-                f"Avg AIVAT: {avg_aivat:.2f}"
+                f"{_format_winrate('Winrate', winnings, big_blind)}"
             )
-        if self._hand_log_path is not None:
-            logger.info(f"Hand history written to {self._hand_log_path}")
+            logger.info(f"Hands won: {wins}/{len(winnings)} ({100 * wins / len(winnings):.1f}%)")
+        if aivat_scores:
+            logger.info(_format_winrate("AIVAT winrate", aivat_scores, big_blind))
+
+        folds = sum(1 for h in hands if h.game_state.has_gto_wizard_folded)
+        logger.info(f"{_OPPONENT_NAME} folded: {folds}/{len(hands)} ({100 * folds / len(hands):.1f}%)")
+
+        by_position: dict[str, list[float]] = {}
+        for hand in hands:
+            hero = _hero_player(hand.game_state.players)
+            if hero is None or hand.game_state.winnings is None:
+                continue
+            by_position.setdefault(hero.position, []).append(hand.game_state.winnings)
+        for position in sorted(by_position):
+            values = by_position[position]
+            logger.info(f"  Position {position}: {len(values)} hands, {_format_winrate('winrate', values, big_blind)}")
 
 
 async def main(

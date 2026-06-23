@@ -47,12 +47,15 @@ When `--key` is omitted, the value of `GTOW_API_KEY` is used.
 
 **Logging hand history:**
 Pass `--log-file` to write each finished hand as a line of JSON (JSONL) for later review/analysis.
-Each record contains the `hand_id`, `board_cards`, `action_history`, `winnings`, `aivat_score`, and
-each player's `position`/`hole_cards`. A summary of total/average winnings and average AIVAT is also
-printed at the end.
+Each record contains the `hand_id`, `street`, `board_cards`, `action_history`, `total_pot`,
+`winnings`, `aivat_score`, `has_gto_wizard_folded`, and each player's `position`/`hole_cards`/`stack`.
 ```bash
 cd src && uv run python -m main --agent-type allin --num-hands 10 --log-file hands.jsonl
 ```
+
+Regardless of `--log-file`, a summary is printed at the end: total/average winnings, win rate,
+bb/100 winrate and AIVAT winrate (both with 95% confidence intervals), the opponent fold rate, and a
+per-position breakdown.
 
 ### Developing your own agent
 To create a custom agent, add a new class in `src/poker_agent.py` that implements the `PokerAgent` protocol.
