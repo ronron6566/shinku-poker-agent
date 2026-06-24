@@ -1,4 +1,5 @@
 import random
+from collections import Counter
 from typing import Protocol
 
 from models import ActRequest, GameServiceResponse
@@ -116,7 +117,13 @@ class HandStrengthAgent:
                 return 1  # suited connector-ish
             return 0
 
-        # postflop: did we make a pair (or better) with the board?
+        # postflop: completed flush/straight beat everything else we track
+        flush = self._flush_count(hole, board)
+        straight = self._straight_count(hole, board)
+        if flush >= 5 or straight >= 5:
+            return 2
+
+        # did we make a pair (or better) with the board?
         board_ranks = [card[0] for card in board]
         top_board = max(board_ranks)
         if rank_a == rank_b:  # pocket pair
@@ -126,4 +133,34 @@ class HandStrengthAgent:
             return 2  # two pair
         if matches:
             return 2 if matches[0] == top_board else 1  # top pair strong, weaker pair medium
+
+        # no made hand, but a flush or straight draw is worth continuing with
+        if flush == 4 or straight == 4:
+            return 1
         return 0
+
+    def _flush_count(self, hole, board) -> int:
+        """Largest count of same-suit cards in a suit we actually hold (4 = draw, 5+ = made flush)."""
+        hole_suits = {suit for _, suit in hole}
+        counts = Counter(suit for _, suit in hole + board)
+        relevant = [count for suit, count in counts.items() if suit in hole_suits]
+        return max(relevant) if relevant else 0
+
+    def _straight_count(self, hole, board) -> int:
+        """Best number of distinct ranks in a 5-rank window that includes one of our hole cards.
+
+        4 means an open-ended or gutshot straight draw, 5 means a completed straight.
+        """
+        ace = _RANKS.index("A")
+        ranks = {rank for rank, _ in hole + board}
+        hole_ranks = {rank for rank, _ in hole}
+        if ace in ranks:  # an ace can also play as the low end of A-2-3-4-5
+            ranks.add(-1)
+        if ace in hole_ranks:
+            hole_ranks.add(-1)
+        best = 0
+        for low in range(-1, 9):
+            window = set(range(low, low + 5))
+            if window & hole_ranks:  # the draw must use one of our cards
+                best = max(best, len(ranks & window))
+        return best
