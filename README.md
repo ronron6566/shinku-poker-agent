@@ -33,6 +33,9 @@ This repository provides skeleton agents to benchmark against GTO Wizard AI:
 - **check_call**: Always checks when possible, otherwise calls
 - **random**: Samples uniformly from legal actions
 - **fold**: Folds when possible, otherwise checks
+- **strength**: A simple tight-aggressive agent. It buckets the hand into weak/medium/strong from the
+  hole cards (preflop) or the made hand vs. the board (postflop): strong hands bet ~3/4 pot or call,
+  medium hands check/call, weak hands check or fold. Meant as a baseline to improve on, not a solver.
 
 **Run an agent:**
 ```bash

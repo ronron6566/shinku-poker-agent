@@ -14,7 +14,14 @@ from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attem
 from tqdm.asyncio import tqdm
 
 from models import GameServiceResponse, NewHandRequest
-from poker_agent import AllinAgent, AlwaysFoldAgent, CheckCallAgent, PokerAgent, RandomUniformAgent
+from poker_agent import (
+    AllinAgent,
+    AlwaysFoldAgent,
+    CheckCallAgent,
+    HandStrengthAgent,
+    PokerAgent,
+    RandomUniformAgent,
+)
 from utils import is_engine_busy_exception
 
 load_dotenv()
@@ -34,6 +41,7 @@ _SUPPORTED_AGENTS = {
     "checkcall": CheckCallAgent,
     "random": RandomUniformAgent,
     "fold": AlwaysFoldAgent,
+    "strength": HandStrengthAgent,
 }
 logger = structlog.get_logger(__name__)
 logging.getLogger("httpx").disabled = True
