@@ -60,5 +60,13 @@ Regardless of `--log-file`, a summary is printed at the end: total/average winni
 bb/100 winrate and AIVAT winrate (both with 95% confidence intervals), the opponent fold rate, and a
 per-position breakdown.
 
+**Saving runs to a database:**
+Set `DATABASE_URL` (a Postgres connection string, e.g. from [Neon](https://neon.tech)) in `.env` to
+persist each run and its hands. Apply the schema once, then runs are saved automatically:
+```bash
+psql "$DATABASE_URL" -f db/schema.sql
+cd src && uv run python -m main --agent-type strength --num-hands 10
+```
+
 ### Developing your own agent
 To create a custom agent, add a new class in `src/poker_agent.py` that implements the `PokerAgent` protocol.

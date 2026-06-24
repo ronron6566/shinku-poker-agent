@@ -19,6 +19,8 @@ cd src && uv run python -m main --agent-type strength --log-file hands.jsonl  # 
 - The API key comes from `--key`, or `GTOW_API_KEY` in a project-root `.env` when `--key` is omitted.
 - `agent_type` is one of the keys in `_SUPPORTED_AGENTS` (main.py): `allin`, `check_call`, `random`,
   `fold`, `strength`.
+- If `DATABASE_URL` (Postgres, e.g. Neon) is set, the run + per-hand history are saved to the DB
+  after the benchmark. Apply the schema once with `psql "$DATABASE_URL" -f db/schema.sql`.
 
 ## Architecture
 
@@ -27,6 +29,7 @@ cd src && uv run python -m main --agent-type strength --log-file hands.jsonl  # 
 - `src/poker_agent.py` — the `PokerAgent` protocol (one `async act()` method) and all agent classes.
 - `src/models.py` — Pydantic models for the API request/response schemas. Read this for field meanings.
 - `src/utils.py` — `is_engine_busy_exception` (which HTTP statuses are retried).
+- `src/db.py` — `save_run` persists a finished run + its hands to Postgres. `db/schema.sql` is the schema.
 
 ## Adding an agent (the main extension point)
 

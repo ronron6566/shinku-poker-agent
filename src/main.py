@@ -72,6 +72,32 @@ def _format_winrate(label: str, values: list[float], big_blind: float) -> str:
     return f"{label}: {bb_per_100:+.1f} bb/100"
 
 
+def _winrate_bb100(values: list[float], big_blind: float) -> float | None:
+    """Numeric bb/100 win rate (no confidence interval), or None if there is no data."""
+    if not values:
+        return None
+    return (sum(v / big_blind for v in values) / len(values)) * 100
+
+
+def _hand_record(response: GameServiceResponse) -> dict:
+    """Flatten a finished hand into a plain dict for JSONL logging and DB persistence."""
+    game_state = response.game_state
+    return {
+        "hand_id": response.hand_id,
+        "street": game_state.street,
+        "board_cards": game_state.board_cards,
+        "action_history": game_state.action_history,
+        "total_pot": game_state.total_pot,
+        "winnings": game_state.winnings,
+        "aivat_score": game_state.aivat_score,
+        "has_gto_wizard_folded": game_state.has_gto_wizard_folded,
+        "players": [
+            {"name": p.name, "position": p.position, "hole_cards": p.hole_cards, "stack": p.stack}
+            for p in game_state.players
+        ],
+    }
+
+
 def log_retry_attempt(retry_state: RetryCallState) -> None:
     exception = retry_state.outcome.exception()
     wait_time = retry_state.next_action.sleep
@@ -94,10 +120,12 @@ class BenchmarkRunner:
         num_concurrent_hands: int,
         game_name: str,
         hand_log_path: str | None = None,
+        agent_type: str = "",
     ):
         self._client = client
         self._agent = agent
         self._game_name = game_name
+        self._agent_type = agent_type
         self._semaphore = asyncio.Semaphore(num_concurrent_hands)
         self._hand_log_path = hand_log_path
         self._hand_log_file = open(hand_log_path, "a") if hand_log_path else None
@@ -112,6 +140,7 @@ class BenchmarkRunner:
         num_concurrent_hands: int,
         game_name: str,
         hand_log_path: str | None = None,
+        agent_type: str = "",
     ) -> "BenchmarkRunner":
         limits = httpx.Limits(max_keepalive_connections=num_concurrent_hands, max_connections=num_concurrent_hands * 2)
         client = httpx.AsyncClient(
@@ -120,7 +149,7 @@ class BenchmarkRunner:
             timeout=180,
             limits=limits,
         )
-        return cls(client, agent, num_concurrent_hands, game_name, hand_log_path)
+        return cls(client, agent, num_concurrent_hands, game_name, hand_log_path, agent_type)
 
     async def __aenter__(self):
         return self
@@ -133,27 +162,7 @@ class BenchmarkRunner:
     async def _log_hand(self, response: GameServiceResponse) -> None:
         if self._hand_log_file is None:
             return
-        game_state = response.game_state
-        record = {
-            "hand_id": response.hand_id,
-            "street": game_state.street,
-            "board_cards": game_state.board_cards,
-            "action_history": game_state.action_history,
-            "total_pot": game_state.total_pot,
-            "winnings": game_state.winnings,
-            "aivat_score": game_state.aivat_score,
-            "has_gto_wizard_folded": game_state.has_gto_wizard_folded,
-            "players": [
-                {
-                    "name": player.name,
-                    "position": player.position,
-                    "hole_cards": player.hole_cards,
-                    "stack": player.stack,
-                }
-                for player in game_state.players
-            ],
-        }
-        line = json.dumps(record) + "\n"
+        line = json.dumps(_hand_record(response)) + "\n"
         async with self._hand_log_lock:
             self._hand_log_file.write(line)
             self._hand_log_file.flush()
@@ -236,7 +245,7 @@ class BenchmarkRunner:
                 hand.cancel()
         await asyncio.gather(*hands, return_exceptions=True)
 
-    async def run(self, num_hands: int) -> None:
+    async def run(self, num_hands: int) -> tuple[dict, list[dict]]:
         logger.info(f"Starting benchmark for {num_hands} hands on game '{self._game_name}'")
         start_time = time.time()
         hands = [asyncio.create_task(self._play_hand()) for _ in range(num_hands)]
@@ -265,6 +274,37 @@ class BenchmarkRunner:
         self._log_summary(successful)
         if self._hand_log_path is not None:
             logger.info(f"Hand history written to {self._hand_log_path}")
+
+        summary = self._compute_summary(successful, num_hands, duration, successful_hands, failed_hands)
+        return summary, [_hand_record(h) for h in successful]
+
+    def _compute_summary(
+        self,
+        hands: list[GameServiceResponse],
+        num_hands: int,
+        duration: float,
+        successful_hands: int,
+        failed_hands: int,
+    ) -> dict:
+        blinds = hands[0].game.blinds if hands else None
+        big_blind = max(blinds) if blinds else 1.0
+        winnings = [h.game_state.winnings for h in hands if h.game_state.winnings is not None]
+        aivat = [h.game_state.aivat_score for h in hands if h.game_state.aivat_score is not None]
+        folds = sum(1 for h in hands if h.game_state.has_gto_wizard_folded)
+        return {
+            "agent_type": self._agent_type,
+            "game_name": self._game_name,
+            "num_hands": num_hands,
+            "successful_hands": successful_hands,
+            "failed_hands": failed_hands,
+            "duration_seconds": duration,
+            "big_blind": big_blind,
+            "total_winnings": sum(winnings) if winnings else None,
+            "winrate_bb100": _winrate_bb100(winnings, big_blind),
+            "aivat_bb100": _winrate_bb100(aivat, big_blind),
+            "hands_won": sum(1 for w in winnings if w > 0) if winnings else None,
+            "opponent_fold_rate": (folds / len(hands)) if hands else None,
+        }
 
     def _log_summary(self, hands: list[GameServiceResponse]) -> None:
         if not hands:
@@ -309,6 +349,7 @@ async def main(
     url: str = _DEFAULT_API_URL,
     game: str = _DEFAULT_GAME_NAME,
     log_file: str | None = None,
+    db_url: str | None = None,
 ):
     """
     Runs poker agent benchmark.
@@ -320,6 +361,7 @@ async def main(
         url: Researcher API URL
         game: Game name
         log_file: Optional path to write per-hand history as JSONL (one finished hand per line)
+        db_url: Optional Postgres connection string to persist the run (defaults to $DATABASE_URL)
     """
     key = key or os.getenv("GTOW_API_KEY")
     if not key:
@@ -333,9 +375,16 @@ async def main(
 
     benchmark_agent = agent_class()
     async with BenchmarkRunner.from_config(
-        benchmark_agent, url, key, num_concurrent_hands, game, log_file
+        benchmark_agent, url, key, num_concurrent_hands, game, log_file, resolved_agent_type
     ) as runner:
-        await runner.run(num_hands)
+        summary, hand_records = await runner.run(num_hands)
+
+    db_url = db_url or os.getenv("DATABASE_URL")
+    if db_url and hand_records:
+        from db import save_run
+
+        run_id = await save_run(db_url, summary, hand_records)
+        logger.info(f"Saved run {run_id} to database ({len(hand_records)} hands)")
 
 
 if __name__ == "__main__":
