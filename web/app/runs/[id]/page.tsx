@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getRun, getHands } from "@/lib/db";
-import { fmtBB, fmtChips, fmtPct, fmtDate, winColor } from "@/lib/poker";
-import { Board } from "@/components/Board";
+import { fmtBB, fmtPct, fmtDate, winColor } from "@/lib/poker";
+import { HandRow } from "@/components/HandRow";
 
 export const dynamic = "force-dynamic";
 
@@ -55,20 +55,7 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
           </thead>
           <tbody>
             {hands.map((h, i) => (
-              <tr key={h.id} className="border-t border-slate-800 hover:bg-slate-900/50">
-                <td className="px-3 py-2">
-                  <Link href={`/hands/${h.id}`} className="text-sky-400 hover:underline">
-                    {i + 1}
-                  </Link>
-                </td>
-                <td className="px-3 py-2">{h.hero_position ?? "—"}</td>
-                <td className="px-3 py-2 font-mono">{h.hero_hole_cards ?? "—"}</td>
-                <td className="px-3 py-2">
-                  <Board board={h.board_cards} size="sm" />
-                </td>
-                <td className={`px-3 py-2 text-right ${winColor(h.winnings)}`}>{fmtChips(h.winnings)}</td>
-                <td className={`px-3 py-2 text-right ${winColor(h.aivat_score)}`}>{fmtChips(h.aivat_score)}</td>
-              </tr>
+              <HandRow key={h.id} hand={h} index={i} />
             ))}
           </tbody>
         </table>
