@@ -2,6 +2,12 @@
 
 Guidance for working in this repository. Keep this file short; put user-facing usage in `README.md`.
 
+## Conventions
+
+- **Git のコミットメッセージは日本語で書く**（このリポジトリのオーナーの希望）。コード・コメント・識別子は
+  既存どおり英語のままでよい。
+- Formatting/lint/imports は `ruff` + `pre-commit` が自動で強制するので、手で整形しない。
+
 ## Overview
 
 A client for the **GTO Wizard Researcher API**. It plays heads-up No-Limit Hold'em hands of your
