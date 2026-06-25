@@ -1,10 +1,15 @@
 import { neon } from "@neondatabase/serverless";
 import type { Run, Hand } from "./types";
 
-const sql = neon(process.env.DATABASE_URL!);
+// Lazy so importing this module never requires DATABASE_URL (e.g. during build); only queries do.
+function getSql() {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is not set");
+  return neon(url);
+}
 
 export async function getRuns(): Promise<Run[]> {
-  return (await sql`
+  return (await getSql()`
     select id::int, agent_type, game_name, num_hands, successful_hands, failed_hands,
            duration_seconds, big_blind, total_winnings, winrate_bb100, aivat_bb100,
            hands_won, opponent_fold_rate, created_at
@@ -13,7 +18,7 @@ export async function getRuns(): Promise<Run[]> {
 }
 
 export async function getRun(id: number): Promise<Run | null> {
-  const rows = (await sql`
+  const rows = (await getSql()`
     select id::int, agent_type, game_name, num_hands, successful_hands, failed_hands,
            duration_seconds, big_blind, total_winnings, winrate_bb100, aivat_bb100,
            hands_won, opponent_fold_rate, created_at
@@ -23,7 +28,7 @@ export async function getRun(id: number): Promise<Run | null> {
 }
 
 export async function getHands(runId: number): Promise<Hand[]> {
-  return (await sql`
+  return (await getSql()`
     select id::int, run_id::int, hand_id::int, street, board_cards, action_history, total_pot,
            winnings, aivat_score, has_gto_wizard_folded, hero_position, hero_hole_cards,
            villain_hole_cards, players, created_at
@@ -32,7 +37,7 @@ export async function getHands(runId: number): Promise<Hand[]> {
 }
 
 export async function getHand(id: number): Promise<Hand | null> {
-  const rows = (await sql`
+  const rows = (await getSql()`
     select id::int, run_id::int, hand_id::int, street, board_cards, action_history, total_pot,
            winnings, aivat_score, has_gto_wizard_folded, hero_position, hero_hole_cards,
            villain_hole_cards, players, created_at
