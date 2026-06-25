@@ -2,41 +2,75 @@
 
 import { useState } from "react";
 import type { Hand } from "@/lib/types";
-import { buildFrames, parseCards, winColor, fmtChips } from "@/lib/poker";
+import { buildFrames, parseCards, winColor, type Frame } from "@/lib/poker";
 import { Card } from "./Card";
 import { Board } from "./Board";
 
-const OPPONENT = "GTO Wizard";
+const OPP = "GTO Wizard";
 
 export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number }) {
-  const frames = buildFrames(hand, bigBlind);
-  const [step, setStep] = useState(frames.length); // start at the end (full hand shown)
+  const startingStack = bigBlind * 200;
+  const frames = buildFrames(hand, bigBlind, startingStack);
+  const [step, setStep] = useState(0); // 0 = blinds posted, before any action
 
-  const current = step > 0 ? frames[step - 1] : null;
-  const boardReveal = current ? current.boardCount : parseCards(hand.board_cards).length;
-  const pot = current ? current.pot : (hand.total_pot ?? 0);
+  const cur: Frame | null = step > 0 ? frames[step - 1] : null;
+  const heroIsSB = (hand.hero_position ?? "SB") === "SB";
 
-  const hero = hand.players.find((p) => p.name !== OPPONENT);
-  const villain = hand.players.find((p) => p.name === OPPONENT);
+  const bb = (chips: number | null | undefined) =>
+    chips === null || chips === undefined ? "—" : (chips / bigBlind).toFixed(1);
 
-  const Seat = ({
-    label,
-    cards,
-    position,
-    active,
-    you,
-  }: {
-    label: string;
-    cards: string | null;
-    position: string | null;
-    active: boolean;
-    you?: boolean;
-  }) => (
-    <div
-      className={`flex items-center gap-3 rounded-lg border px-4 py-3 transition ${
-        active ? "border-amber-400 bg-amber-400/10" : "border-slate-700 bg-slate-800/50"
+  // State at the current step (pre-action state uses the posted blinds).
+  const boardReveal = cur ? cur.boardCount : 0;
+  const pot = cur ? cur.pot : bigBlind * 1.5;
+  const committed = cur
+    ? cur.committed
+    : { hero: heroIsSB ? bigBlind / 2 : bigBlind, villain: heroIsSB ? bigBlind : bigBlind / 2 };
+  const stack = cur
+    ? cur.stack
+    : { hero: startingStack - (heroIsSB ? bigBlind / 2 : bigBlind), villain: startingStack - (heroIsSB ? bigBlind : bigBlind / 2) };
+
+  const hero = hand.players.find((p) => p.name !== OPP);
+  const villain = hand.players.find((p) => p.name === OPP);
+
+  const actionLabel = (f: Frame) =>
+    f.type === "bet" ? `B ${bb(f.amount)}` : f.type === "call" ? "Call" : f.type === "check" ? "Check" : "Fold";
+
+  const Bubble = ({ f }: { f: Frame }) => (
+    <span
+      className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
+        f.type === "fold"
+          ? "bg-rose-500/20 text-rose-300"
+          : f.type === "bet"
+            ? "bg-amber-400 text-slate-900"
+            : "bg-slate-200 text-slate-900"
       }`}
     >
+      {actionLabel(f)}
+    </span>
+  );
+
+  const Seat = ({
+    name,
+    you,
+    position,
+    cards,
+    stackChips,
+    committedChips,
+    button,
+    active,
+    bubble,
+  }: {
+    name: string;
+    you?: boolean;
+    position: string | null;
+    cards: string | null;
+    stackChips: number;
+    committedChips: number;
+    button: boolean;
+    active: boolean;
+    bubble: Frame | null;
+  }) => (
+    <div className="flex flex-col items-center gap-1.5">
       <div className="flex gap-1.5">
         {parseCards(cards).length ? (
           parseCards(cards).map((c, i) => <Card key={i} card={c} size="md" />)
@@ -47,64 +81,99 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
           </>
         )}
       </div>
-      <div>
-        <div className="font-semibold text-slate-100">
-          {label} {you && <span className="text-xs text-amber-300">(you)</span>}
+      <div
+        className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-center transition ${
+          active ? "border-amber-400 bg-amber-400/10" : "border-slate-600 bg-slate-800"
+        }`}
+      >
+        {button && (
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-slate-200 text-[10px] font-bold text-slate-900">
+            D
+          </span>
+        )}
+        <div className="leading-tight">
+          <div className="text-xs font-semibold text-slate-100">
+            {name} {you && <span className="text-amber-300">(you)</span>}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {position} · {bb(stackChips)} BB
+          </div>
         </div>
-        <div className="text-xs text-slate-400">{position ?? "—"}</div>
+      </div>
+      <div className="flex h-6 items-center gap-2">
+        {committedChips > 0 && (
+          <span className="rounded-full bg-slate-900/80 px-2 py-0.5 text-[11px] text-amber-200 ring-1 ring-amber-500/40">
+            {bb(committedChips)} BB
+          </span>
+        )}
+        {bubble && <Bubble f={bubble} />}
       </div>
     </div>
   );
 
   return (
-    <div className="space-y-6">
-      {/* Table */}
-      <div className="rounded-2xl border border-emerald-900 bg-gradient-to-b from-emerald-950 to-slate-950 p-6">
-        <div className="flex items-center justify-between gap-4">
-          <Seat
-            label={villain?.name ?? OPPONENT}
-            cards={hand.villain_hole_cards}
-            position={villain?.position ?? null}
-            active={current?.actorSide === "villain"}
-          />
-          <div className="text-right text-sm text-slate-400">
-            <div>Pot</div>
-            <div className="text-xl font-bold text-slate-100">{Math.round(pot).toLocaleString()}</div>
-          </div>
-        </div>
+    <div className="space-y-5">
+      {/* Action history ribbon */}
+      <div className="flex gap-1.5 overflow-x-auto pb-1">
+        {frames.map((f, i) => (
+          <button
+            key={i}
+            onClick={() => setStep(i + 1)}
+            className={`shrink-0 rounded px-2 py-1 text-xs ${
+              step === i + 1
+                ? "bg-amber-400 text-slate-900"
+                : f.actorSide === "hero"
+                  ? "bg-amber-400/15 text-amber-200"
+                  : "bg-sky-400/15 text-sky-200"
+            }`}
+          >
+            {f.actorPosition} {actionLabel(f)}
+          </button>
+        ))}
+      </div>
 
-        <div className="my-6 flex flex-col items-center gap-2">
+      {/* Table */}
+      <div className="rounded-[40%/22%] border-2 border-emerald-800 bg-gradient-to-b from-emerald-900/70 to-slate-950 px-4 py-8">
+        <Seat
+          name={villain?.name ?? OPP}
+          position={villain?.position ?? null}
+          cards={hand.villain_hole_cards}
+          stackChips={stack.villain}
+          committedChips={committed.villain}
+          button={!heroIsSB}
+          active={cur?.actorSide === "villain"}
+          bubble={cur?.actorSide === "villain" ? cur : null}
+        />
+
+        <div className="my-5 flex flex-col items-center gap-2">
           <Board board={hand.board_cards} reveal={boardReveal} size="lg" />
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            {current ? current.street : hand.street}
+          <div className="rounded-full bg-slate-900/70 px-4 py-1 text-sm font-bold text-slate-100">
+            {bb(pot)} BB
           </div>
+          <div className="text-[11px] uppercase tracking-widest text-slate-500">{cur ? cur.street : "preflop"}</div>
         </div>
 
         <Seat
-          label={hero?.name ?? "Hero"}
-          cards={hand.hero_hole_cards}
-          position={hero?.position ?? null}
-          active={current?.actorSide === "hero"}
+          name={hero?.name ?? "Hero"}
           you
+          position={hero?.position ?? null}
+          cards={hand.hero_hole_cards}
+          stackChips={stack.hero}
+          committedChips={committed.hero}
+          button={heroIsSB}
+          active={cur?.actorSide === "hero"}
+          bubble={cur?.actorSide === "hero" ? cur : null}
         />
-      </div>
-
-      {/* Current action */}
-      <div className="flex items-center justify-center gap-2 text-sm">
-        {current ? (
-          <span className="text-slate-200">
-            <span className={current.actorSide === "hero" ? "text-amber-300" : "text-sky-300"}>
-              {current.actorPosition}
-            </span>{" "}
-            ({current.actorSide === "hero" ? "you" : OPPONENT}): <b>{current.label}</b>
-          </span>
-        ) : (
-          <span className="text-slate-500">Start — blinds posted</span>
-        )}
       </div>
 
       {/* Controls */}
       <div className="flex items-center gap-3">
+        <button
+          onClick={() => setStep(0)}
+          className="rounded-md bg-slate-700 px-3 py-1.5 text-sm font-medium text-slate-100"
+        >
+          ↺ Replay
+        </button>
         <button
           onClick={() => setStep((s) => Math.max(0, s - 1))}
           disabled={step === 0}
@@ -132,34 +201,19 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
         step {step} / {frames.length}
       </div>
 
-      {/* Action timeline */}
-      <div className="flex flex-wrap gap-1.5">
-        {frames.map((f, i) => (
-          <button
-            key={i}
-            onClick={() => setStep(i + 1)}
-            className={`rounded px-2 py-1 text-xs ${
-              step === i + 1
-                ? "bg-amber-400 text-slate-900"
-                : f.actorSide === "hero"
-                  ? "bg-amber-400/15 text-amber-200"
-                  : "bg-sky-400/15 text-sky-200"
-            }`}
-          >
-            {f.actorPosition} {f.label}
-          </button>
-        ))}
-      </div>
-
       {/* Result */}
-      <div className="flex justify-center gap-8 border-t border-slate-800 pt-4 text-sm">
+      <div className="flex justify-center gap-10 border-t border-slate-800 pt-4 text-sm">
         <div className="text-center">
-          <div className="text-slate-400">Result (chips)</div>
-          <div className={`text-lg font-bold ${winColor(hand.winnings)}`}>{fmtChips(hand.winnings)}</div>
+          <div className="text-slate-400">Result</div>
+          <div className={`text-lg font-bold ${winColor(hand.winnings)}`}>
+            {hand.winnings != null ? `${hand.winnings >= 0 ? "+" : ""}${bb(hand.winnings)} BB` : "—"}
+          </div>
         </div>
         <div className="text-center">
           <div className="text-slate-400">AIVAT (luck-adjusted)</div>
-          <div className={`text-lg font-bold ${winColor(hand.aivat_score)}`}>{fmtChips(hand.aivat_score)}</div>
+          <div className={`text-lg font-bold ${winColor(hand.aivat_score)}`}>
+            {hand.aivat_score != null ? `${hand.aivat_score >= 0 ? "+" : ""}${bb(hand.aivat_score)} BB` : "—"}
+          </div>
         </div>
       </div>
     </div>
