@@ -45,7 +45,9 @@ export function winColor(n: number | null | undefined): string {
 const STREETS = ["preflop", "flop", "turn", "river"];
 const BOARD_BY_STREET: Record<string, number> = { preflop: 0, flop: 3, turn: 4, river: 5 };
 
-export type ActionType = "fold" | "check" | "call" | "bet";
+export type ActionType = "fold" | "check" | "call" | "bet" | "runout";
+
+const STREET_BY_BOARD: Record<number, string> = { 3: "flop", 4: "turn", 5: "river" };
 
 export type Frame = {
   street: string;
@@ -115,6 +117,30 @@ export function buildFrames(hand: Hand, bigBlind: number, startingStack = bigBli
     }
 
     if (tok !== "f") actor = other(actor);
+  }
+
+  // All-in run-out: when betting ends before the river but both players are committed, the API still
+  // deals the remaining board to showdown. The action history has no further "_", so reveal the extra
+  // board cards as run-out frames (no actor, pot/stacks unchanged from the last action).
+  const fullBoard = parseCards(hand.board_cards).length;
+  const last = frames[frames.length - 1];
+  const lastReveal = last ? last.boardCount : 0;
+  if (last && last.type !== "fold" && fullBoard > lastReveal) {
+    for (const count of [3, 4, 5]) {
+      if (count > lastReveal && count <= fullBoard) {
+        frames.push({
+          street: STREET_BY_BOARD[count],
+          boardCount: count,
+          pot: last.pot,
+          actorPosition: "",
+          actorSide: "hero",
+          type: "runout",
+          amount: null,
+          committed: { hero: 0, villain: 0 },
+          stack: last.stack,
+        });
+      }
+    }
   }
 
   return frames;

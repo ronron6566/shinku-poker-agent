@@ -33,7 +33,17 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
   const villain = hand.players.find((p) => p.name === OPP);
 
   const actionLabel = (f: Frame) =>
-    f.type === "bet" ? `B ${bb(f.amount)}` : f.type === "call" ? "Call" : f.type === "check" ? "Check" : "Fold";
+    f.type === "bet"
+      ? `B ${bb(f.amount)}`
+      : f.type === "call"
+        ? "Call"
+        : f.type === "check"
+          ? "Check"
+          : f.type === "runout"
+            ? f.street
+            : "Fold";
+
+  const isAction = (f: Frame | null): f is Frame => !!f && f.type !== "runout";
 
   const Bubble = ({ f }: { f: Frame }) => (
     <span
@@ -122,12 +132,14 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
             className={`shrink-0 rounded px-2 py-1 text-xs ${
               step === i + 1
                 ? "bg-amber-400 text-slate-900"
-                : f.actorSide === "hero"
-                  ? "bg-amber-400/15 text-amber-200"
-                  : "bg-sky-400/15 text-sky-200"
+                : f.type === "runout"
+                  ? "bg-slate-700 text-slate-300"
+                  : f.actorSide === "hero"
+                    ? "bg-amber-400/15 text-amber-200"
+                    : "bg-sky-400/15 text-sky-200"
             }`}
           >
-            {f.actorPosition} {actionLabel(f)}
+            {f.type === "runout" ? `↳ ${actionLabel(f)}` : `${f.actorPosition} ${actionLabel(f)}`}
           </button>
         ))}
       </div>
@@ -141,8 +153,8 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
           stackChips={stack.villain}
           committedChips={committed.villain}
           button={!heroIsSB}
-          active={cur?.actorSide === "villain"}
-          bubble={cur?.actorSide === "villain" ? cur : null}
+          active={isAction(cur) && cur.actorSide === "villain"}
+          bubble={isAction(cur) && cur.actorSide === "villain" ? cur : null}
         />
 
         <div className="my-5 flex flex-col items-center gap-2">
@@ -161,8 +173,8 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
           stackChips={stack.hero}
           committedChips={committed.hero}
           button={heroIsSB}
-          active={cur?.actorSide === "hero"}
-          bubble={cur?.actorSide === "hero" ? cur : null}
+          active={isAction(cur) && cur.actorSide === "hero"}
+          bubble={isAction(cur) && cur.actorSide === "hero" ? cur : null}
         />
       </div>
 
