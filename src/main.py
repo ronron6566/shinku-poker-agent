@@ -18,6 +18,7 @@ from poker_agent import (
     AllinAgent,
     AlwaysFoldAgent,
     CheckCallAgent,
+    GtoPreflopAgent,
     HandStrengthAgent,
     PokerAgent,
     RandomUniformAgent,
@@ -42,6 +43,7 @@ _SUPPORTED_AGENTS = {
     "random": RandomUniformAgent,
     "fold": AlwaysFoldAgent,
     "strength": HandStrengthAgent,
+    "gto": GtoPreflopAgent,
 }
 logger = structlog.get_logger(__name__)
 logging.getLogger("httpx").disabled = True
