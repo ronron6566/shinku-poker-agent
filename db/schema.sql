@@ -33,6 +33,7 @@ create table if not exists hands (
     hero_hole_cards       text,
     villain_hole_cards    text,
     players               jsonb,
+    decisions             jsonb,
     created_at            timestamptz not null default now()
 );
 

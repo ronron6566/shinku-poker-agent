@@ -54,8 +54,8 @@ async def save_run(db_url: str, summary: dict, hands: list[dict]) -> int:
                     insert into hands (
                         run_id, hand_id, street, board_cards, action_history, total_pot,
                         winnings, aivat_score, has_gto_wizard_folded, hero_position,
-                        hero_hole_cards, villain_hole_cards, players
-                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        hero_hole_cards, villain_hole_cards, players, decisions
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         run_id,
@@ -71,6 +71,7 @@ async def save_run(db_url: str, summary: dict, hands: list[dict]) -> int:
                         hero["hole_cards"] if hero else None,
                         villain["hole_cards"] if villain else None,
                         json.dumps(hand["players"]),
+                        json.dumps(hand.get("decisions", [])),
                     ),
                 )
         await conn.commit()

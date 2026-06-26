@@ -188,9 +188,15 @@ _RAISE_SIZE_BB = {
 }
 
 
-class GtoPreflopAgent:
-    """Plays preflop by sampling GTO Wizard's range tables (mixed strategy), and defers postflop
-    decisions to HandStrengthAgent until the postflop ranges are also encoded."""
+def _split_cards(s: str | None) -> list[str]:
+    return [s[i : i + 2] for i in range(0, len(s), 2)] if s else []
+
+
+class GtoAgent:
+    """Preflop: sample GTO Wizard's range tables (mixed). Postflop: reconstruct the opponent's range
+    from the preflop line, narrow it street-by-street under the assumption the opponent plays this
+    same strategy, then act on equity vs that range and pot odds. Every action carries a reason
+    string explaining the decision (captured for the DB / replay UI)."""
 
     def __init__(self):
         self._ranges: dict[str, dict] = {}
@@ -201,22 +207,30 @@ class GtoPreflopAgent:
 
     async def act(self, game_state: GameServiceResponse) -> ActRequest:
         gs = game_state.game_state
-        if gs.street != "preflop":
-            return await self._postflop.act(game_state)
-
-        hero = next((p for p in gs.players if p.hole_cards is not None), None)
-        node = self._node(gs, hero) if hero else None
-        table = self._ranges.get(node, {}) if node else {}
-        freqs = table.get(_hole_to_key(hero.hole_cards)) if hero and hero.hole_cards else None
-        if not freqs:  # spot not covered by the tables (deeper bet trees, etc.) -> fall back
-            return await self._postflop.act(game_state)
-
-        action = random.choices(list(freqs), weights=list(freqs.values()), k=1)[0]
         big_blind = max(game_state.game.blinds) if game_state.game.blinds else 100
-        return self._to_request(action, gs, node, big_blind)
+        hero = next((p for p in gs.players if p.hole_cards is not None), None)
+        if hero is None or hero.hole_cards is None:
+            return ActRequest(action="k" if "k" in gs.legal_actions else "c", reason="no hole cards")
+
+        if gs.street == "preflop":
+            return self._preflop(gs, hero, big_blind)
+        return self._postflop_decision(gs, hero, big_blind)
+
+    # ----- preflop -----
+    def _preflop(self, gs, hero, big_blind: int) -> ActRequest:
+        node = self._node(gs, hero)
+        table = self._ranges.get(node, {}) if node else {}
+        key = _hole_to_key(hero.hole_cards)
+        freqs = table.get(key)
+        if not freqs:
+            req = self._postflop_fallback(gs, "preflop spot not in tables")
+            return req
+        action = random.choices(list(freqs), weights=list(freqs.values()), k=1)[0]
+        mix = ", ".join(f"{a} {p:.0%}" for a, p in freqs.items())
+        reason = f"preflop {node}: {key} [{mix}] → sampled {action}"
+        return self._to_request(action, gs, node, big_blind, reason)
 
     def _node(self, gs, hero) -> str | None:
-        """Identify the preflop decision node from the hero's position and the action so far."""
         preflop = []
         for a in gs.action_history:
             if a == "_":
@@ -228,9 +242,9 @@ class GtoPreflopAgent:
                 return "sb_open"
             if len(preflop) == 2:
                 if preflop[0] == "c" and is_bet(preflop[1]):
-                    return "sb_vs_raise"  # SB limped, BB raised
+                    return "sb_vs_raise"
                 if is_bet(preflop[0]) and is_bet(preflop[1]):
-                    return "sb_vs_3bet"  # SB raised, BB 3bet
+                    return "sb_vs_3bet"
         elif hero.position == "BB":
             if len(preflop) == 1:
                 if preflop[0] == "c":
@@ -239,19 +253,70 @@ class GtoPreflopAgent:
                     return "bb_vs_raise"
         return None
 
-    def _to_request(self, action: str, gs, node: str, big_blind: int) -> ActRequest:
+    def _to_request(self, action: str, gs, node: str, big_blind: int, reason: str) -> ActRequest:
         legal = gs.legal_actions
         if action in ("raise", "3bet", "4bet"):
             if "b" in legal and gs.raise_range is not None:
                 target = int(_RAISE_SIZE_BB[node] * big_blind)
                 amount = max(int(gs.raise_range.min), min(target, int(gs.raise_range.max)))
-                return ActRequest(action="b", amount=amount)
-            return ActRequest(action="c" if "c" in legal else "k")
+                return ActRequest(action="b", amount=amount, reason=reason)
+            return ActRequest(action="c" if "c" in legal else "k", reason=reason + " (can't raise)")
         if action == "check":
-            return ActRequest(action="k" if "k" in legal else "c")
+            return ActRequest(action="k" if "k" in legal else "c", reason=reason)
         if action == "fold":
             if "f" in legal:
-                return ActRequest(action="f")
-            return ActRequest(action="k" if "k" in legal else "c")
-        # limp / call
-        return ActRequest(action="c" if "c" in legal else "k")
+                return ActRequest(action="f", reason=reason)
+            return ActRequest(action="k" if "k" in legal else "c", reason=reason + " (can't fold)")
+        return ActRequest(action="c" if "c" in legal else "k", reason=reason)  # limp / call
+
+    # ----- postflop -----
+    def _postflop_fallback(self, gs, why: str) -> ActRequest:
+        legal = gs.legal_actions
+        if "k" in legal:
+            return ActRequest(action="k", reason=f"fallback ({why}): check")
+        if "c" in legal:
+            return ActRequest(action="c", reason=f"fallback ({why}): call")
+        return ActRequest(action="f", reason=f"fallback ({why}): fold")
+
+    def _postflop_decision(self, gs, hero, big_blind: int) -> ActRequest:
+        import postflop as pf
+
+        hole = _split_cards(hero.hole_cards)
+        board = _split_cards(gs.board_cards)
+        preflop = pf._split_streets(gs.action_history)[0]
+        vnode = pf.villain_preflop_node(hero.position, preflop)
+        if vnode is None:
+            return self._postflop_fallback(gs, "deep preflop line")
+
+        dead = set(hole) | set(board)
+        vrange = pf.reconstruct_range(vnode[0], vnode[1], dead)
+        vrange = pf.narrow_villain_range(vrange, gs.action_history, hero.position, board)
+        equity = pf.equity_vs_range(hole, board, vrange)
+        to_call = pf.to_call_postflop(gs.action_history, hero.position)
+        pot = gs.total_pot
+        legal = gs.legal_actions
+        can_bet = "b" in legal and gs.raise_range is not None
+
+        def clamp(x):
+            return max(int(gs.raise_range.min), min(int(x), int(gs.raise_range.max)))
+
+        head = f"{gs.street}: eq {equity:.0%} vs villain({len(vrange)})"
+
+        if to_call > 0 and "c" in legal:  # facing a bet
+            req = to_call / (pot + to_call)
+            if equity >= 0.80 and can_bet:
+                return ActRequest(action="b", amount=clamp(pot), reason=f"{head} | strong, raise for value")
+            if equity >= req:
+                return ActRequest(action="c", reason=f"{head} | potodds {req:.0%} → call")
+            if "f" in legal:
+                return ActRequest(action="f", reason=f"{head} | potodds {req:.0%} → fold")
+            return ActRequest(action="c", reason=f"{head} | can't fold → call")
+
+        # no bet to face: bet for value, occasionally bluff, else check
+        if equity >= 0.62 and can_bet:
+            return ActRequest(action="b", amount=clamp(0.66 * pot), reason=f"{head} | value bet 0.66 pot")
+        if equity <= 0.35 and can_bet and random.random() < 0.3:
+            return ActRequest(action="b", amount=clamp(0.5 * pot), reason=f"{head} | bluff 0.5 pot")
+        if "k" in legal:
+            return ActRequest(action="k", reason=f"{head} | check")
+        return ActRequest(action="c" if "c" in legal else "f", reason=f"{head} | no check → call/fold")

@@ -75,6 +75,9 @@ class ActRequest(BaseModel):
         'b': Bet""",
     )
     amount: int | None = Field(default=None, description="Amount of the bet action")
+    # Human-readable explanation of why the agent chose this action. Excluded from the API payload
+    # (the server only wants action/amount); captured by the runner for logging/DB.
+    reason: str | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(
         json_schema_extra={

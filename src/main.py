@@ -18,7 +18,7 @@ from poker_agent import (
     AllinAgent,
     AlwaysFoldAgent,
     CheckCallAgent,
-    GtoPreflopAgent,
+    GtoAgent,
     HandStrengthAgent,
     PokerAgent,
     RandomUniformAgent,
@@ -43,7 +43,7 @@ _SUPPORTED_AGENTS = {
     "random": RandomUniformAgent,
     "fold": AlwaysFoldAgent,
     "strength": HandStrengthAgent,
-    "gto": GtoPreflopAgent,
+    "gto": GtoAgent,
 }
 logger = structlog.get_logger(__name__)
 logging.getLogger("httpx").disabled = True
@@ -81,7 +81,7 @@ def _winrate_bb100(values: list[float], big_blind: float) -> float | None:
     return (sum(v / big_blind for v in values) / len(values)) * 100
 
 
-def _hand_record(response: GameServiceResponse) -> dict:
+def _hand_record(response: GameServiceResponse, decisions: list[dict] | None = None) -> dict:
     """Flatten a finished hand into a plain dict for JSONL logging and DB persistence."""
     game_state = response.game_state
     return {
@@ -97,6 +97,7 @@ def _hand_record(response: GameServiceResponse) -> dict:
             {"name": p.name, "position": p.position, "hole_cards": p.hole_cards, "stack": p.stack}
             for p in game_state.players
         ],
+        "decisions": decisions or [],
     }
 
 
@@ -208,27 +209,38 @@ class BenchmarkRunner:
         response = await self._post("/hands", json_data=request)
         return GameServiceResponse(**response.json())
 
-    async def _act(self, hand_id: int, game_state: GameServiceResponse) -> GameServiceResponse:
+    async def _act(self, hand_id: int, game_state: GameServiceResponse):
         action_request = await self._agent.act(game_state)
         response = await self._post(
             f"/hands/{hand_id}/act",
-            json_data=action_request.model_dump(),
+            json_data=action_request.model_dump(),  # reason is excluded from the payload
             hand_id=hand_id,
             game_state=game_state,
         )
-        return GameServiceResponse(**response.json())
+        return GameServiceResponse(**response.json()), action_request
 
-    async def _play_hand(self) -> GameServiceResponse | None:
+    async def _play_hand(self) -> tuple[GameServiceResponse, list[dict]] | None:
         hand_id = None
         async with self._semaphore:
             try:
                 game_service_response = await self._create_new_hand()
                 hand_id = game_service_response.hand_id
 
+                decisions: list[dict] = []
                 while not game_service_response.game_state.is_hand_over:
-                    game_service_response = await self._act(hand_id, game_service_response)
+                    before = game_service_response.game_state
+                    game_service_response, action_request = await self._act(hand_id, game_service_response)
+                    decisions.append(
+                        {
+                            "street": before.street,
+                            "board_cards": before.board_cards,
+                            "action": action_request.action,
+                            "amount": action_request.amount,
+                            "reason": action_request.reason,
+                        }
+                    )
                 await self._log_hand(game_service_response)
-                return game_service_response
+                return game_service_response, decisions
             except httpx.HTTPStatusError as e:
                 logger.error(
                     f"{_format_http_error(e)} after exhausting retries",
@@ -265,6 +277,7 @@ class BenchmarkRunner:
         end_time = time.time()
         duration = end_time - start_time
         successful = [r for r in results if r is not None]
+        responses = [r for r, _ in successful]
         successful_hands = len(successful)
         failed_hands = len(results) - successful_hands
         seconds_per_hand = duration / num_hands if num_hands > 0 else 0
@@ -273,12 +286,12 @@ class BenchmarkRunner:
             f"Successful hands: {successful_hands}. Failed hands: {failed_hands}. Average seconds/hand: {seconds_per_hand:.3f}"
         )
 
-        self._log_summary(successful)
+        self._log_summary(responses)
         if self._hand_log_path is not None:
             logger.info(f"Hand history written to {self._hand_log_path}")
 
-        summary = self._compute_summary(successful, num_hands, duration, successful_hands, failed_hands)
-        return summary, [_hand_record(h) for h in successful]
+        summary = self._compute_summary(responses, num_hands, duration, successful_hands, failed_hands)
+        return summary, [_hand_record(r, decisions) for r, decisions in successful]
 
     def _compute_summary(
         self,

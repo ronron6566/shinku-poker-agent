@@ -57,6 +57,119 @@ def reconstruct_range(node: str, action: str, dead: set[str]) -> list[tuple[tupl
     return out
 
 
+def _strength(board_ints: list[int], hole_ints: list[int]) -> float:
+    """現時点の役の強さ(0..1, 高いほど強い). 相手モデルの高速な強さ指標に使う(将来カードは見ない)."""
+    rank = _EVAL.evaluate(board_ints, hole_ints)  # 1=最強, 7462=最弱
+    return (7462 - rank) / 7461
+
+
+# 相手モデル(対称戦略の仮定): 現時点の役の強さ s から各アクションの確率。
+# ベットはポラライズ(強い手+一部ブラフ)、チェックは中間中心、コール/レイズは強さで継続。
+def _p_bet(s: float) -> float:
+    return 0.85 if s > 0.66 else (0.30 if s < 0.33 else 0.20)
+
+
+def _p_raise(s: float) -> float:
+    return 0.85 if s > 0.85 else (0.25 if s > 0.6 else 0.03)
+
+
+def _p_call(s: float) -> float:
+    return 0.9 if s > 0.45 else (0.3 if s > 0.3 else 0.05)
+
+
+_P_ACTION = {
+    "bet": _p_bet,
+    "raise": _p_raise,
+    "call": _p_call,
+    "check": lambda s: 1.0 - _p_bet(s),
+}
+
+
+def _split_streets(action_history: list[str]) -> list[list[str]]:
+    streets: list[list[str]] = [[]]
+    for a in action_history:
+        if a == "_":
+            streets.append([])
+        else:
+            streets[-1].append(a)
+    return streets
+
+
+def narrow_villain_range(
+    villain_range: list[tuple[tuple[int, int], float]],
+    action_history: list[str],
+    hero_position: str,
+    full_board: list[str],
+) -> list[tuple[tuple[int, int], float]]:
+    """ポストフロップの相手アクションごとに、相手モデルでレンジの重みを更新(ベイズ狭め込み)."""
+    other = {"SB": "BB", "BB": "SB"}
+    villain = other[hero_position]
+    streets = _split_streets(action_history)
+    board_count = {1: 3, 2: 4, 3: 5}  # streets index -> 見えているボード枚数
+    r = villain_range
+    for si in range(1, len(streets)):  # 1=flop, 2=turn, 3=river
+        bc = board_count.get(si, 5)
+        if len(full_board) < bc:
+            break
+        board_ints = [Card.new(c) for c in full_board[:bc]]
+        actor = "BB"  # ポストフロップは BB(アウトオブポジション)が先
+        bet_seen = False
+        for a in streets[si]:
+            if actor == villain and a != "f":
+                if a == "k":
+                    ctx = "check"
+                elif a == "c":
+                    ctx = "call"
+                elif a.startswith("b"):
+                    ctx = "raise" if bet_seen else "bet"
+                else:
+                    ctx = None
+                if ctx:
+                    fn = _P_ACTION[ctx]
+                    r = [(cc, w * fn(_strength(board_ints, list(cc)))) for cc, w in r]
+                    r = [(cc, w) for cc, w in r if w > 1e-6]
+            if a.startswith("b"):
+                bet_seen = True
+            if a != "f":
+                actor = other[actor]
+    return r
+
+
+# プリフロップのラインから相手の(ノード, アクション)を求めるためのマップ。
+# キー = (preflopアクションのタプル), 値 = {"SB": (node, action), "BB": (node, action)}
+def villain_preflop_node(hero_position: str, preflop: list[str]) -> tuple[str, str] | None:
+    pf = [a for a in preflop if a]
+    is_bet = lambda a: a.startswith("b")  # noqa: E731
+    sb = bb = None
+    if len(pf) == 2 and is_bet(pf[0]) and pf[1] == "c":
+        sb, bb = ("sb_open", "raise"), ("bb_vs_raise", "call")
+    elif len(pf) == 2 and pf[0] == "c" and pf[1] == "k":
+        sb, bb = ("sb_open", "limp"), ("bb_vs_limp", "check")
+    elif len(pf) == 3 and pf[0] == "c" and is_bet(pf[1]) and pf[2] == "c":
+        sb, bb = ("sb_vs_raise", "call"), ("bb_vs_limp", "raise")
+    elif len(pf) == 3 and is_bet(pf[0]) and is_bet(pf[1]) and pf[2] == "c":
+        sb, bb = ("sb_vs_3bet", "call"), ("bb_vs_raise", "3bet")
+    else:
+        return None
+    return bb if hero_position == "SB" else sb
+
+
+def to_call_postflop(action_history: list[str], hero_position: str) -> int:
+    """ポストフロップの現ストリートで、自分が続けるために必要なコール額(チップ)."""
+    other = {"SB": "BB", "BB": "SB"}
+    street = _split_streets(action_history)[-1]
+    committed = {"SB": 0, "BB": 0}
+    actor = "BB"
+    for a in street:
+        if a == "c":
+            committed[actor] = committed[other[actor]]
+        elif a.startswith("b"):
+            committed[actor] = int(a[1:])
+        if a != "f":
+            actor = other[actor]
+    return committed[other[hero_position]] - committed[hero_position]
+
+
 def equity_vs_range(
     hero: list[str],
     board: list[str],
