@@ -22,6 +22,14 @@ export type Run = {
   created_at: string;
 };
 
+export type Decision = {
+  street: string;
+  board_cards: string;
+  action: string;
+  amount: number | null;
+  reason: string | null;
+};
+
 export type Hand = {
   id: number;
   run_id: number;
@@ -37,5 +45,6 @@ export type Hand = {
   hero_hole_cards: string | null;
   villain_hole_cards: string | null;
   players: Player[];
+  decisions: Decision[];
   created_at: string;
 };

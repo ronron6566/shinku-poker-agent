@@ -40,7 +40,7 @@ export async function getHand(id: number): Promise<Hand | null> {
   const rows = (await getSql()`
     select id::int, run_id::int, hand_id::int, street, board_cards, action_history, total_pot,
            winnings, aivat_score, has_gto_wizard_folded, hero_position, hero_hole_cards,
-           villain_hole_cards, players, created_at
+           villain_hole_cards, players, decisions, created_at
     from hands where id = ${id}
   `) as Hand[];
   return rows[0] ?? null;

@@ -32,6 +32,14 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
   const hero = hand.players.find((p) => p.name !== OPP);
   const villain = hand.players.find((p) => p.name === OPP);
 
+  // Map each hero action frame (in order) to its saved decision (reason).
+  const decisions = hand.decisions ?? [];
+  let heroSeen = 0;
+  const decisionByFrame = frames.map((f) =>
+    f.type !== "runout" && f.actorSide === "hero" ? (decisions[heroSeen++] ?? null) : null,
+  );
+  const curDecision = cur ? decisionByFrame[step - 1] : null;
+
   const actionLabel = (f: Frame) =>
     f.type === "bet"
       ? `B ${bb(f.amount)}`
@@ -176,6 +184,22 @@ export function HandReplay({ hand, bigBlind }: { hand: Hand; bigBlind: number })
           active={isAction(cur) && cur.actorSide === "hero"}
           bubble={isAction(cur) && cur.actorSide === "hero" ? cur : null}
         />
+      </div>
+
+      {/* Decision reason for the current (hero) action */}
+      <div className="min-h-[3rem] rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-sm">
+        {curDecision?.reason ? (
+          <>
+            <span className="mr-2 rounded bg-amber-400/20 px-1.5 py-0.5 text-xs font-semibold text-amber-300">
+              なぜこの手?
+            </span>
+            <span className="text-slate-200">{curDecision.reason}</span>
+          </>
+        ) : (
+          <span className="text-slate-500">
+            {cur ? "（相手のアクション）" : "ハンド開始（ブラインド投入）"}
+          </span>
+        )}
       </div>
 
       {/* Controls */}
